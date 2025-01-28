@@ -1,3 +1,11 @@
+mod testing_utils {
+    pub trait Boxed: Sized {
+        fn boxed(self) -> Box<Self> {
+            Box::new(self)
+        }
+    }
+    impl<T> Boxed for T {}
+}
 mod lexing {
 
     use logos::Logos;
@@ -95,10 +103,28 @@ mod lexing {
         CompoundMul,
         #[token("/=")]
         CompoundDiv,
+        #[token(r"\^=")]
+        CompoundXor,
+        #[token(r"&=")]
+        CompoundAnd,
+        #[token(r"\|=")]
+        CompoundOr,
         #[token("fn")]
         Function,
         #[token("nullptr")]
         NullPtr,
+        #[token("as")]
+        AsCast,
+        #[token(",")]
+        Comma,
+        #[token(r"\.")]
+        Period,
+        #[token(">>")]
+        Shr,
+        #[token("<<")]
+        Shl,
+        #[token("!")]
+        LogicalNot,
         EOF,
     }
 
@@ -259,7 +285,7 @@ mod parsing {
             }
         }
         pub fn parse_expr(&mut self) -> Result<Expression, ParsingError> {
-            todo!()
+            self.parse_expr_bp(0)
         }
         fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expression, ParsingError> {
             let lhs = self.lexer.next().ok_or(ParsingError::WrongToken {
@@ -271,11 +297,10 @@ mod parsing {
                 Token::NumberLiteral(n) => Expression::IntLiteral(n),
                 Token::Ident(ident) => Expression::Ident(ident),
                 Token::NullPtr => Expression::NullPtr,
-                // TODO parse as type cast
                 Token::OpenParen => {
                     let expr = self.parse_expr_bp(0)?;
                     let closing = self.lexer.next().ok_or(ParsingError::WrongToken {
-                        expected: Expected::Str("expression"),
+                        expected: Expected::Token(Token::CloseParen),
                         found: Token::EOF,
                         span: self.lexer.span().into(),
                     })??;
@@ -298,6 +323,8 @@ mod parsing {
                 | Token::OpenSquare
                 | Token::Tilde
                 | Token::Increment
+                | Token::LogicalNot
+                | Token::Ampersand
                 | Token::Decrement) => {
                     let ((), rbp) = prefix_binding_power(&token);
                     let inner = self.parse_expr_bp(rbp)?;
@@ -308,6 +335,8 @@ mod parsing {
                         Token::Tilde => Expression::BitwiseNot(Box::new(inner)),
                         Token::Increment => Expression::PreIncrement(Box::new(inner)),
                         Token::Decrement => Expression::PreDecrement(Box::new(inner)),
+                        Token::LogicalNot => Expression::LogicalNot(Box::new(inner)),
+                        Token::Ampersand => Expression::AddrOf(Box::new(inner)),
                         _ => unreachable!(),
                     }
                 }
@@ -342,9 +371,28 @@ mod parsing {
                             }
                         }
                     }
+                    Token::Period => {
+                        self.lexer.next();
+                        let field = self.lexer.next().ok_or(ParsingError::WrongToken {
+                            expected: Expected::Str("struct member"),
+                            found: Token::EOF,
+                            span: self.lexer.span().into(),
+                        })??;
+                        match field {
+                            Token::Ident(ident) => {
+                                lhs = Expression::MemberAccess(Box::new(lhs), ident);
+                                continue;
+                            }
+                            other => {
+                                return Err(ParsingError::WrongToken {
+                                    expected: Expected::Str("struct member"),
+                                    found: other,
+                                    span: self.lexer.span().into(),
+                                })
+                            }
+                        }
+                    }
                     t @ (Token::Asterisk
-                    // TODO single equals assignment return
-                    // TODO shift{left,right}
                     | Token::Minus
                     | Token::Plus
                     | Token::Slash
@@ -360,13 +408,19 @@ mod parsing {
                     | Token::Ampersand
                     | Token::Pipe
                     | Token::Increment
-                    | Token::Decrement) => t,
-                    Token::Semicolon
+                    | Token::Decrement
                     | Token::Equals
+                    | Token::Shl
+                    | Token::Shr
                     | Token::CompoundAdd
                     | Token::CompoundSub
                     | Token::CompoundMul
-                    | Token::CompoundDiv => break,
+                    | Token::CompoundDiv
+                    | Token::CompoundAnd
+                    | Token::CompoundOr
+                    | Token::CompoundXor
+                    | Token::AsCast) => t,
+                    Token::CloseParen | Token::CloseSquare | Token::Semicolon => break,
                     Token::EOF => unreachable!(),
                     t => {
                         return Err(ParsingError::WrongToken {
@@ -382,13 +436,52 @@ mod parsing {
                     }
                     self.lexer.next();
                     match op {
-                        Token::OpenParen => todo!(),
-                        Token::OpenSquare => todo!(),
+                        Token::OpenParen => {
+                            let exprs = self.parse_args()?;
+                            let closing = self.lexer.next().ok_or(ParsingError::WrongToken {
+                                expected: Expected::Token(Token::CloseParen),
+                                found: Token::EOF,
+                                span: self.lexer.span().into(),
+                            })??;
+                            match closing {
+                                Token::CloseParen => (),
+                                other => {
+                                    return Err(ParsingError::WrongToken {
+                                        expected: Expected::Token(Token::CloseParen),
+                                        found: other,
+                                        span: self.lexer.span().into(),
+                                    })
+                                }
+                            }
+                            lhs = Expression::FunctionCall(Box::new(lhs), exprs);
+                        }
+                        Token::OpenSquare => {
+                            let expr = self.parse_expr_bp(0)?;
+                            let closing = self.lexer.next().ok_or(ParsingError::WrongToken {
+                                expected: Expected::Token(Token::CloseSquare),
+                                found: Token::EOF,
+                                span: self.lexer.span().into(),
+                            })??;
+                            match closing {
+                                Token::CloseSquare => (),
+                                other => {
+                                    return Err(ParsingError::WrongToken {
+                                        expected: Expected::Token(Token::CloseSquare),
+                                        found: other,
+                                        span: self.lexer.span().into(),
+                                    })
+                                }
+                            }
+                            lhs = Expression::ArrayIndex(Box::new(lhs), Box::new(expr));
+                        }
                         Token::Increment => lhs = Expression::PostIncrement(Box::new(lhs)),
                         Token::Decrement => lhs = Expression::PostDecrement(Box::new(lhs)),
+                        Token::AsCast => {
+                            let typ = self.parse_type()?;
+                            lhs = Expression::Cast(Box::new(lhs), typ);
+                        }
                         _ => unreachable!(),
                     }
-                    // lhs = S::Cons(op, vec![lhs]);
                     continue;
                 }
                 if let Some((lbp, rbp)) = infix_binding_power(&op) {
@@ -426,37 +519,141 @@ mod parsing {
                             lhs = Expression::BitwiseAnd(Box::new(lhs), Box::new(rhs))
                         }
                         Token::Pipe => lhs = Expression::BitwiseOr(Box::new(lhs), Box::new(rhs)),
+                        Token::Equals => lhs = Expression::Assignment(Box::new(lhs), Box::new(rhs)),
+                        Token::Shl => lhs = Expression::ShiftLeft(Box::new(lhs), Box::new(rhs)),
+                        Token::Shr => lhs = Expression::ShiftRight(Box::new(lhs), Box::new(rhs)),
+                        Token::CompoundAdd => {
+                            lhs = Expression::CompoundAdd(Box::new(lhs), Box::new(rhs))
+                        }
+                        Token::CompoundSub => {
+                            lhs = Expression::CompoundSub(Box::new(lhs), Box::new(rhs))
+                        }
+                        Token::CompoundMul => {
+                            lhs = Expression::CompoundMul(Box::new(lhs), Box::new(rhs))
+                        }
+                        Token::CompoundDiv => {
+                            lhs = Expression::CompoundDiv(Box::new(lhs), Box::new(rhs))
+                        }
+                        Token::CompoundAnd => {
+                            lhs = Expression::CompoundAnd(Box::new(lhs), Box::new(rhs))
+                        }
+                        Token::CompoundOr => {
+                            lhs = Expression::CompoundOr(Box::new(lhs), Box::new(rhs))
+                        }
+                        Token::CompoundXor => {
+                            lhs = Expression::CompoundXor(Box::new(lhs), Box::new(rhs))
+                        }
                         _ => unreachable!(),
                     }
+                    continue;
                 }
                 break;
             }
             Ok(lhs)
         }
+
+        pub fn parse_args(&mut self) -> Result<Vec<Expression>, ParsingError> {
+            match self.lexer.peek() {
+                Some(Ok(t)) => {
+                    if let Token::CloseParen = t {
+                        // empty function call
+                        return Ok(Vec::new());
+                    }
+                }
+                Some(Err(e)) => return Err(e.into()),
+                None => return Err(ParsingError::EOF),
+            };
+            let mut exprs = Vec::new();
+            let first_expr = self.parse_expr()?;
+            exprs.push(first_expr);
+            loop {
+                match self.lexer.peek() {
+                    Some(Ok(t)) => {
+                        if let Token::CloseParen = t {
+                            return Ok(exprs);
+                        } else if let Token::Comma = t {
+                            // this is what we expect
+                            self.lexer.next();
+                        } else {
+                            self.lexer.next();
+                            return Err(ParsingError::WrongToken {
+                                expected: Expected::Token(Token::CloseParen),
+                                found: t,
+                                span: self.lexer.span().into(),
+                            });
+                        }
+                    }
+                    Some(Err(e)) => return Err(e.into()),
+                    None => return Err(ParsingError::EOF),
+                };
+                let expr = self.parse_expr()?;
+                exprs.push(expr)
+            }
+        }
+
         pub fn parse_assign_to(&mut self) -> Result<Type, ParsingError> {
             todo!()
         }
     }
     fn prefix_binding_power(op: &Token) -> ((), u8) {
         match op {
-            // '+' | '-' => ((), 5),
+            Token::Increment
+            | Token::Decrement
+            | Token::Minus
+            | Token::Plus
+            | Token::LogicalNot
+            | Token::Tilde
+            | Token::Asterisk => ((), 95),
             _ => todo!(),
         }
     }
     fn infix_binding_power(op: &Token) -> Option<(u8, u8)> {
         match op {
+            Token::Asterisk | Token::Slash => Some((85, 86)),
+            Token::Plus | Token::Minus => Some((80, 81)),
+            Token::Shl | Token::Shr => Some((75, 76)),
+            Token::GreaterThanEquals
+            | Token::GreaterThan
+            | Token::LessThanEquals
+            | Token::LessThan => Some((70, 71)),
+            Token::DoubleEquals | Token::NotEquals => Some((65, 66)),
+            Token::Ampersand => Some((60, 61)),
+            Token::Circumflex => Some((55, 56)),
+            Token::Pipe => Some((50, 51)),
+            Token::Equals
+            | Token::CompoundAdd
+            | Token::CompoundSub
+            | Token::CompoundMul
+            | Token::CompoundDiv
+            | Token::CompoundXor
+            | Token::CompoundAnd
+            | Token::CompoundOr => Some((45, 46)),
             // '+' | '-' => (1, 2),
             // '*' | '/' => (3, 4),
             // '.' => (8, 7),
-            _ => panic!("bad op: {op:?}"),
+            _ => None,
         }
     }
     fn postfix_binding_power(op: &Token) -> Option<(u8, ())> {
-        let res = match op {
-            // '!' => (7, ()),
-            _ => return todo!(),
-        };
-        Some(res)
+        match op {
+            Token::Increment | Token::Decrement | Token::OpenParen | Token::OpenSquare => {
+                Some((101, ()))
+            }
+            Token::AsCast => Some((91, ())),
+            _ => None,
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn simple_parse() {
+            let mut parser = Parser::new("Something * **x->y->something / ((5 as int**) * 5)");
+            let parsed = parser.parse_expr().unwrap();
+            dbg!(parsed);
+            assert!(parser.lexer.next().is_none());
+        }
     }
 }
 
@@ -520,21 +717,11 @@ mod ast {
         For(For),
         Parenthesized(Box<Statement>),
         // TODO LVALUE ALL
-        Assignment {
-            to: Box<Expression>,
-            value: Box<Expression>,
-        },
-        CompoundAdd(Box<Expression>, Box<Expression>),
-        CompoundSub(Box<Expression>, Box<Expression>),
-        CompoundMul(Box<Expression>, Box<Expression>),
-        CompoundDiv(Box<Expression>, Box<Expression>),
-        CompoundBitwiseAnd(Box<Expression>, Box<Expression>),
-        CompoundBitwiseOr(Box<Expression>, Box<Expression>),
-        CompoundBitwiseXor(Box<Expression>, Box<Expression>),
         // TODO goto?
     }
     #[derive(Debug, Clone)]
     pub enum Expression {
+        LogicalNot(Box<Expression>),
         Equals(Box<Expression>, Box<Expression>),
         NotEquals(Box<Expression>, Box<Expression>),
         GreaterThanOrEquals(Box<Expression>, Box<Expression>),
@@ -558,15 +745,25 @@ mod ast {
         BitwiseNot(Box<Expression>),
         ShiftLeft(Box<Expression>, Box<Expression>),
         ShiftRight(Box<Expression>, Box<Expression>),
-        FunctionCall(String, Vec<Expression>),
+        FunctionCall(Box<Expression>, Vec<Expression>),
         StructInstantiation(Vec<Expression>),
         NullPtr,
+        MemberAccess(Box<Expression>, String),
         UnaryNegation(Box<Expression>),
         UnaryPlus(Box<Expression>),
         PreIncrement(Box<Expression>),
         PreDecrement(Box<Expression>),
         PostIncrement(Box<Expression>),
         PostDecrement(Box<Expression>),
+        Assignment(Box<Expression>, Box<Expression>),
+        AddrOf(Box<Expression>),
+        CompoundAdd(Box<Expression>, Box<Expression>),
+        CompoundSub(Box<Expression>, Box<Expression>),
+        CompoundMul(Box<Expression>, Box<Expression>),
+        CompoundDiv(Box<Expression>, Box<Expression>),
+        CompoundAnd(Box<Expression>, Box<Expression>),
+        CompoundOr(Box<Expression>, Box<Expression>),
+        CompoundXor(Box<Expression>, Box<Expression>),
     }
 
     #[derive(Debug, Clone)]
