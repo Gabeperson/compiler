@@ -1,167 +1,216 @@
-mod testing_utils {
-    pub trait Boxed: Sized {
-        fn boxed(self) -> Box<Self> {
-            Box::new(self)
-        }
-    }
-    impl<T> Boxed for T {}
-}
+#![allow(unused)]
+#![allow(dead_code)]
+mod span;
 mod lexing {
+    use crate::ast::{Span, Spanned};
+    use regex::Regex;
+    use std::sync::LazyLock;
 
-    use logos::Logos;
-
-    use crate::ast::Span;
-
-    #[derive(Debug, Clone, Default, PartialEq)]
+    #[derive(Debug, Clone)]
     pub enum LexingError {
-        IntegerOverflow {
-            slice: String,
-            span: Span,
-        },
-        #[default]
-        UnknownToken,
+        UnknownToken { position: usize },
+        Eof,
     }
 
-    #[derive(Clone, Debug, Logos)]
-    #[logos(error = LexingError)]
-    #[logos(skip r#"[ \t\n]+"#)]
+    #[derive(Clone, Debug)]
     pub enum Token {
-        #[token("struct")]
         Struct,
-        #[token("int")]
         Int,
-        #[token("void")]
         Void,
-        #[token("*")]
         Asterisk,
-        #[token("-")]
         Minus,
-        #[token("+")]
         Plus,
-        #[token("/")]
         Slash,
-        #[token("{")]
         OpenCurly,
-        #[token("}")]
         CloseCurly,
-        #[token("(")]
         OpenParen,
-        #[token(")")]
         CloseParen,
-        #[token("[")]
         OpenSquare,
-        #[token("]")]
         CloseSquare,
-        #[regex(r#"\d+"#, |lex| lex.slice().parse().map_err(|_| LexingError::IntegerOverflow { slice: lex.slice().to_owned(), span: lex.span().into() }))]
-        #[regex(r#"0x[\da-fA-F]+"#, |lex| u32::from_str_radix(lex.slice(), 16).map_err(|_| {
-            LexingError::IntegerOverflow { slice: lex.slice().to_owned(), span: lex.span().into() }
-        }).map(|n| n as i32))]
-        NumberLiteral(i32),
-        #[regex(r#"[_a-zA-Z][_a-zA-Z\d]*"#, |lex| lex.slice().to_string())]
+        DecLiteral(String),
+        HexLiteral(String),
         Ident(String),
-        #[token(";")]
         Semicolon,
-        #[token("=")]
         Equals,
-        #[token("==")]
         DoubleEquals,
-        #[token(">=")]
         GreaterThanEquals,
-        #[token("<=")]
         LessThanEquals,
-        #[token(">")]
         GreaterThan,
-        #[token("<")]
         LessThan,
-        #[token("!=")]
         NotEquals,
-        #[token("~")]
         Tilde,
-        #[token("^")]
         Circumflex,
-        #[token("&")]
         Ampersand,
-        #[token("|")]
         Pipe,
-        #[token("if")]
         If,
-        #[token("while")]
         While,
-        #[token("for")]
         For,
-        #[token("++")]
         Increment,
-        #[token("--")]
         Decrement,
-        #[token("->")]
         Arrow,
-        #[token("+=")]
         CompoundAdd,
-        #[token("-=")]
         CompoundSub,
-        #[token("*=")]
         CompoundMul,
-        #[token("/=")]
         CompoundDiv,
-        #[token(r"\^=")]
         CompoundXor,
-        #[token(r"&=")]
         CompoundAnd,
-        #[token(r"\|=")]
         CompoundOr,
-        #[token("fn")]
         Function,
-        #[token("nullptr")]
         NullPtr,
-        #[token("as")]
         AsCast,
-        #[token(",")]
         Comma,
-        #[token(r"\.")]
         Period,
-        #[token(">>")]
         Shr,
-        #[token("<<")]
         Shl,
-        #[token("!")]
         LogicalNot,
-        EOF,
     }
 
-    pub trait PeekableLexer<T> {
-        fn peek(&self) -> Option<Result<T, LexingError>>;
+    type LexConvertFunction = fn(&str) -> Token;
+
+    static REGEX_DEFS: &[(&str, LexConvertFunction)] = &[
+        (r"^\+\+", |_| Token::Increment),
+        (r"^--", |_| Token::Decrement),
+        (r"^->", |_| Token::Arrow),
+        (r"^\+=", |_| Token::CompoundAdd),
+        (r"^-=", |_| Token::CompoundSub),
+        (r"^\*=", |_| Token::CompoundMul),
+        (r"^>>", |_| Token::Shr),
+        (r"^<<", |_| Token::Shl),
+        (r"^>=", |_| Token::GreaterThanEquals),
+        (r"^<=", |_| Token::LessThanEquals),
+        (r"^!=", |_| Token::NotEquals),
+        (r"^==", |_| Token::DoubleEquals),
+        (r"^\/=", |_| Token::CompoundDiv),
+        (r"^\^=", |_| Token::CompoundXor),
+        (r"^&=", |_| Token::CompoundAnd),
+        (r"^\|=", |_| Token::CompoundOr),
+        (r"^\*", |_| Token::Asterisk),
+        (r"^-", |_| Token::Minus),
+        (r"^\+", |_| Token::Plus),
+        (r"^\/", |_| Token::Slash),
+        (r"^=", |_| Token::Equals),
+        (r"^>", |_| Token::GreaterThan),
+        (r"^<", |_| Token::LessThan),
+        (r"^!", |_| Token::LogicalNot),
+        (r"^~", |_| Token::Tilde),
+        (r"^\^", |_| Token::Circumflex),
+        (r"^&", |_| Token::Ampersand),
+        (r"^\|", |_| Token::Pipe),
+        (r"^\{", |_| Token::OpenCurly),
+        (r"^\}", |_| Token::CloseCurly),
+        (r"^\(", |_| Token::OpenParen),
+        (r"^\)", |_| Token::CloseParen),
+        (r"^\[", |_| Token::OpenSquare),
+        (r"^\]", |_| Token::CloseSquare),
+        (r"^struct\b", |_| Token::Struct),
+        (r"^int\b", |_| Token::Int),
+        (r"^void\b", |_| Token::Void),
+        (r"^if\b", |_| Token::If),
+        (r"^while\b", |_| Token::While),
+        (r"^for\b", |_| Token::For),
+        (r"^fn\b", |_| Token::Function),
+        (r"^nullptr\b", |_| Token::NullPtr),
+        (r"^as\b", |_| Token::AsCast),
+        (r#"^[_a-zA-Z][_a-zA-Z0-9]*"#, |slice| {
+            Token::Ident(slice.to_owned())
+        }),
+        (r#"^0x[0-9a-zA-Z]*"#, |slice| {
+            Token::HexLiteral(slice[2..].to_owned())
+        }),
+        (r#"^[0-9a-zA-Z]+"#, |slice| {
+            Token::DecLiteral(slice.to_owned())
+        }),
+        (r"^;", |_| Token::Semicolon),
+        (r"^,", |_| Token::Comma),
+        (r"^\.", |_| Token::Period),
+    ];
+
+    static RE_COMPILED_DEFS: LazyLock<&[(Regex, LexConvertFunction)]> = LazyLock::new(|| {
+        let boxed: Box<[(Regex, LexConvertFunction)]> = REGEX_DEFS
+            .iter()
+            .map(|(re, mapper)| (Regex::new(re).unwrap(), *mapper))
+            .collect();
+        Box::leak(boxed)
+    });
+
+    static WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s+").unwrap());
+
+    #[derive(Debug)]
+    pub struct Lexer<'a> {
+        input: &'a str,
+        position: usize,
+        next: Option<Spanned<Token>>,
     }
 
-    impl PeekableLexer<Token> for logos::Lexer<'_, Token> {
-        fn peek(&self) -> Option<Result<Token, LexingError>> {
-            self.clone().next()
+    impl<'a> Lexer<'a> {
+        pub fn new(s: &'a str) -> Self {
+            Self {
+                input: s,
+                position: 0,
+                next: None,
+            }
+        }
+        pub fn next(&mut self) -> Result<Spanned<Token>, LexingError> {
+            if let Some(r) = self.next.take() {
+                let span = r.span();
+                self.position += (span.end - span.start);
+                return Ok(r);
+            }
+            let next = self.get_next()?;
+            let span = next.span();
+            self.position += (span.end - span.start);
+            Ok(next)
+        }
+        pub fn peek(&mut self) -> Result<Spanned<Token>, LexingError> {
+            if let Some(spanned) = &self.next {
+                return Ok(spanned.clone());
+            }
+            self.get_next()
+        }
+        fn get_next(&mut self) -> Result<Spanned<Token>, LexingError> {
+            if let Some(m) = WHITESPACE.find(&self.input[self.position..]) {
+                self.position += m.len();
+            }
+            if self.input[self.position..].is_empty() {
+                return Err(LexingError::Eof);
+            }
+            for (re, mapping_fn) in RE_COMPILED_DEFS.iter() {
+                if let Some(m) = re.find(&self.input[self.position..]) {
+                    let token = mapping_fn(m.as_str());
+                    let span = Span::new(self.position, self.position + m.len());
+                    return Ok(Spanned(token, span));
+                }
+            }
+            Err(LexingError::UnknownToken {
+                position: self.position,
+            })
         }
     }
 }
 
-mod parsing {
+pub mod parsing {
+    use lexer_helper::NextExpect;
+
     use super::ast::*;
     use super::lexing::*;
-    use logos::Lexer;
-    use logos::Logos as _;
-    #[derive(Clone, Debug)]
-    struct Parser<'s> {
-        lexer: Lexer<'s, Token>,
+    #[derive(Debug)]
+    pub struct Parser<'s> {
+        lexer: Lexer<'s>,
     }
 
     #[derive(Debug, Clone)]
-    enum ParsingError {
+    pub enum ParsingError {
         Lexing(LexingError),
-        EOF,
+        Eof(Expected),
         WrongToken {
             expected: Expected,
-            found: Token,
-            span: Span,
+            found: Spanned<Token>,
         },
+        InvalidInteger(Spanned<Token>),
     }
 
     #[derive(Debug, Clone)]
-    enum Expected {
+    pub enum Expected {
         Str(&'static str),
         Token(Token),
     }
@@ -172,46 +221,108 @@ mod parsing {
         }
     }
 
-    #[derive(Debug, Clone)]
-    struct Checkpoint<'s> {
-        lexer: Lexer<'s, Token>,
-    }
+    // #[derive(Debug)]
+    // struct Checkpoint<'s> {
+    //     lexer: Lexer<'s>,
+    // }
 
     impl<'s> Parser<'s> {
         pub fn new(s: &'s str) -> Self {
             Self {
-                lexer: Token::lexer(s),
+                lexer: Lexer::new(s),
             }
         }
-        fn checkpoint(&self) -> Checkpoint<'s> {
-            Checkpoint {
-                lexer: self.lexer.clone(),
-            }
+        // fn checkpoint(&self) -> Checkpoint<'s> {
+        //     Checkpoint {
+        //         lexer: self.lexer.clone(),
+        //     }
+        // }
+        // fn restore(&mut self, checkpoint: Checkpoint<'s>) {
+        //     self.lexer = checkpoint.lexer;
+        // }
+    }
+
+    mod lexer_helper {
+        use super::*;
+        pub trait NextExpect {
+            fn next_expect(&mut self, exp: Token) -> Result<Spanned<Token>, ParsingError>;
+            fn next_expect_number(&mut self) -> Result<Spanned<i32>, ParsingError>;
+            fn next_expect_ident(
+                &mut self,
+                usage: &'static str,
+            ) -> Result<Spanned<Token>, ParsingError>;
+            fn next_expect_non_eof(
+                &mut self,
+                exp: Expected,
+            ) -> Result<Spanned<Token>, ParsingError>;
         }
-        fn restore(&mut self, checkpoint: Checkpoint<'s>) {
-            self.lexer = checkpoint.lexer;
+        impl NextExpect for Lexer<'_> {
+            fn next_expect(&mut self, expected: Token) -> Result<Spanned<Token>, ParsingError> {
+                let token = self.next_expect_non_eof(Expected::Token(expected.clone()))?;
+                if std::mem::discriminant(&expected) != std::mem::discriminant(&token.0) {
+                    return Err(ParsingError::WrongToken {
+                        expected: Expected::Token(expected),
+                        found: token,
+                    });
+                }
+                Ok(token)
+            }
+
+            fn next_expect_number(&mut self) -> Result<Spanned<i32>, ParsingError> {
+                let token = self.next_expect_non_eof(Expected::Str("number"))?;
+                match token {
+                    Spanned(Token::DecLiteral(num), span) => match num.parse() {
+                        Ok(n) => Ok(Spanned(n, span)),
+                        Err(_) => Err(ParsingError::InvalidInteger(Spanned(
+                            Token::DecLiteral(num),
+                            span,
+                        ))),
+                    },
+                    Spanned(Token::HexLiteral(num), span) => match u32::from_str_radix(&num, 16) {
+                        Ok(n) => Ok(Spanned(n as i32, span)),
+                        Err(_) => Err(ParsingError::InvalidInteger(Spanned(
+                            Token::HexLiteral(num),
+                            span,
+                        ))),
+                    },
+                    other => Err(ParsingError::WrongToken {
+                        expected: Expected::Str("number"),
+                        found: other,
+                    }),
+                }
+            }
+
+            fn next_expect_ident(
+                &mut self,
+                usage: &'static str,
+            ) -> Result<Spanned<Token>, ParsingError> {
+                let token = self.next_expect_non_eof(Expected::Str("ident"))?;
+                match token {
+                    t @ Spanned(Token::Ident(_), _) => Ok(t),
+                    other => Err(ParsingError::WrongToken {
+                        expected: Expected::Str(usage),
+                        found: other,
+                    }),
+                }
+            }
+
+            fn next_expect_non_eof(
+                &mut self,
+                exp: Expected,
+            ) -> Result<Spanned<Token>, ParsingError> {
+                self.next().map_err(|e| match e {
+                    e @ LexingError::UnknownToken { position } => ParsingError::Lexing(e),
+                    LexingError::Eof => ParsingError::Eof(exp),
+                })
+            }
         }
     }
+
     impl Parser<'_> {
-        pub fn expect_semicolon(&mut self) -> Result<(), ParsingError> {
-            let semi = self.lexer.next().ok_or(ParsingError::WrongToken {
-                expected: Expected::Token(Token::Semicolon),
-                found: Token::EOF,
-                span: self.lexer.span().into(),
-            })??;
-            match semi {
-                Token::Semicolon => Ok(()),
-                other => Err(ParsingError::WrongToken {
-                    expected: Expected::Token(Token::Semicolon),
-                    found: other,
-                    span: self.lexer.span().into(),
-                }),
-            }
-        }
         pub fn parse_program(&mut self) -> Result<Program, ParsingError> {
             todo!()
         }
-        pub fn parse_toplevel(&mut self) -> Result<TopLevel, ParsingError> {
+        pub fn parse_toplevel(&mut self) -> Result<TopLevelDecl, ParsingError> {
             todo!()
         }
         pub fn parse_function_decl(&mut self) -> Result<FunctionDecl, ParsingError> {
@@ -222,211 +333,196 @@ mod parsing {
         }
         pub fn parse_variable_decl(&mut self) -> Result<VariableDecl, ParsingError> {
             let typ = self.parse_type()?;
-            let res = self.lexer.next().ok_or(ParsingError::EOF)??;
-            let base = match res {
-                Token::Ident(ident) => ident,
-                other => {
-                    return Err(ParsingError::WrongToken {
-                        expected: Expected::Str("variable name"),
-                        found: other,
-                        span: self.lexer.span().into(),
-                    })
-                }
-            };
+            let name = self.lexer.next_expect_ident("variable name")?;
             // handle arrays
             // handle assignment sign (=)
             // handle expression
             // handle semicolon
             todo!()
         }
-        pub fn parse_type(&mut self) -> Result<Type, ParsingError> {
-            let res = self.lexer.next().ok_or(ParsingError::EOF)??;
+        pub fn parse_type(&mut self) -> Result<Spanned<Type>, ParsingError> {
+            let res = self.lexer.next_expect_non_eof(Expected::Str("type"))?;
             let base = match res {
-                Token::Struct => {
-                    let struct_name = self.lexer.next().ok_or(ParsingError::EOF)??;
+                Spanned(Token::Struct, span) => {
+                    let struct_name = self.lexer.next_expect_ident("struct name")?;
                     match struct_name {
-                        Token::Ident(ident) => Type::Struct(ident),
-                        other => {
-                            return Err(ParsingError::WrongToken {
-                                expected: Expected::Str("struct name"),
-                                found: other,
-                                span: self.lexer.span().into(),
-                            })
-                        }
+                        Spanned(Token::Ident(ident), span) => Spanned(Type::Struct(ident), span),
+                        _ => unreachable!(),
                     }
                 }
-                Token::Int => Type::Int,
-                Token::Void => Type::Void,
-                Token::Function => todo!("need punctuated support"),
+                Spanned(Token::Int, span) => Spanned(Type::Int, span),
+                Spanned(Token::Void, span) => Spanned(Type::Void, span),
+                Spanned(Token::Function, span) => todo!("need punctuated support"),
                 other => {
                     return Err(ParsingError::WrongToken {
                         expected: Expected::Str("type"),
                         found: other,
-                        span: self.lexer.span().into(),
                     })
                 }
             };
             let mut curr = base;
-            while let Some(Ok(Token::Asterisk)) = self.lexer.peek() {
+            let start_base = curr.span().start;
+            while let Ok(Spanned(Token::Asterisk, span)) = self.lexer.peek() {
                 self.lexer.next();
-                curr = Type::Ptr(Box::new(curr));
+                curr = Spanned(Type::Ptr(Box::new(curr)), Span::new(start_base, span.end));
             }
             Ok(curr)
         }
-        pub fn parse_ident(&mut self, err: &'static str) -> Result<String, ParsingError> {
-            let struct_name = self.lexer.next().ok_or(ParsingError::EOF)??;
-            match struct_name {
-                Token::Ident(ident) => Ok(ident),
-                other => Err(ParsingError::WrongToken {
-                    expected: Expected::Str("struct name"),
-                    found: other,
-                    span: self.lexer.span().into(),
-                }),
-            }
-        }
-        pub fn parse_expr(&mut self) -> Result<Expression, ParsingError> {
+        pub fn parse_expr(&mut self) -> Result<Spanned<Expression>, ParsingError> {
             self.parse_expr_bp(0)
         }
-        fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expression, ParsingError> {
-            let lhs = self.lexer.next().ok_or(ParsingError::WrongToken {
-                expected: Expected::Str("expression"),
-                found: Token::EOF,
-                span: self.lexer.span().into(),
-            })??;
+        fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Spanned<Expression>, ParsingError> {
+            let lhs = self
+                .lexer
+                .next_expect_non_eof(Expected::Str("expression"))?;
             let mut lhs = match lhs {
-                Token::NumberLiteral(n) => Expression::IntLiteral(n),
-                Token::Ident(ident) => Expression::Ident(ident),
-                Token::NullPtr => Expression::NullPtr,
-                Token::OpenParen => {
-                    let expr = self.parse_expr_bp(0)?;
-                    let closing = self.lexer.next().ok_or(ParsingError::WrongToken {
-                        expected: Expected::Token(Token::CloseParen),
-                        found: Token::EOF,
-                        span: self.lexer.span().into(),
-                    })??;
-                    match closing {
-                        Token::CloseParen => (),
-                        other => {
-                            return Err(ParsingError::WrongToken {
-                                expected: Expected::Token(Token::CloseParen),
-                                found: other,
-                                span: self.lexer.span().into(),
-                            })
-                        }
+                Spanned(Token::DecLiteral(n), span) => match n.parse() {
+                    Ok(n) => Spanned(Expression::IntLiteral(n), span),
+                    Err(_) => {
+                        return Err(ParsingError::InvalidInteger(Spanned(
+                            Token::DecLiteral(n),
+                            span,
+                        )))
                     }
-                    expr
+                },
+                Spanned(Token::HexLiteral(n), span) => match u32::from_str_radix(&n, 16) {
+                    Ok(n) => Spanned(Expression::IntLiteral(n as i32), span),
+                    Err(_) => {
+                        return Err(ParsingError::InvalidInteger(Spanned(
+                            Token::HexLiteral(n),
+                            span,
+                        )))
+                    }
+                },
+                Spanned(Token::Ident(ident), span) => Spanned(Expression::Ident(ident), span),
+                Spanned(Token::NullPtr, span) => Spanned(Expression::NullPtr, span),
+                Spanned(Token::OpenParen, span) => {
+                    let expr = self.parse_expr_bp(0)?;
+                    let start = span.start;
+                    let end_token = self.lexer.next_expect(Token::CloseParen)?;
+                    let end = end_token.span().end;
+                    Spanned(
+                        Expression::Parenthesized(expr.map(Box::new)),
+                        Span::new(start, end),
+                    )
                 }
 
-                token @ (Token::Asterisk
-                | Token::Minus
-                | Token::Plus
-                | Token::OpenSquare
-                | Token::Tilde
-                | Token::Increment
-                | Token::LogicalNot
-                | Token::Ampersand
-                | Token::Decrement) => {
+                token @ Spanned(
+                    Token::Asterisk
+                    | Token::Minus
+                    | Token::Plus
+                    | Token::OpenSquare
+                    | Token::Tilde
+                    | Token::Increment
+                    | Token::LogicalNot
+                    | Token::Ampersand
+                    | Token::Decrement,
+                    span,
+                ) => {
                     let ((), rbp) = prefix_binding_power(&token);
                     let inner = self.parse_expr_bp(rbp)?;
-                    match token {
-                        Token::Asterisk => Expression::AsteriskDereference(Box::new(inner)),
-                        Token::Minus => Expression::UnaryNegation(Box::new(inner)),
-                        Token::Plus => Expression::UnaryPlus(Box::new(inner)),
-                        Token::Tilde => Expression::BitwiseNot(Box::new(inner)),
-                        Token::Increment => Expression::PreIncrement(Box::new(inner)),
-                        Token::Decrement => Expression::PreDecrement(Box::new(inner)),
-                        Token::LogicalNot => Expression::LogicalNot(Box::new(inner)),
-                        Token::Ampersand => Expression::AddrOf(Box::new(inner)),
-                        _ => unreachable!(),
-                    }
+                    let inner_end = inner.span().end;
+                    let Spanned(token, span) = token;
+                    #[rustfmt::skip]
+                    let ret = Spanned(
+                        match token {
+                            Token::Asterisk => Expression::AsteriskDereference(inner.map(Box::new).with_end(inner_end)),
+                            Token::Minus => Expression::UnaryNegation(inner.map(Box::new).with_end(inner_end)),
+                            Token::Plus => Expression::UnaryPlus(inner.map(Box::new).with_end(inner_end)),
+                            Token::Tilde => Expression::BitwiseNot(inner.map(Box::new).with_end(inner_end)),
+                            Token::Increment => Expression::PreIncrement(inner.map(Box::new).with_end(inner_end)),
+                            Token::Decrement => Expression::PreDecrement(inner.map(Box::new).with_end(inner_end)),
+                            Token::LogicalNot => Expression::LogicalNot(inner.map(Box::new).with_end(inner_end)),
+                            Token::Ampersand => Expression::AddrOf(inner.map(Box::new).with_end(inner_end)),
+                            _ => unreachable!(),
+                        },
+                        span,
+                    );
+                    ret
                 }
                 other => {
                     return Err(ParsingError::WrongToken {
                         expected: Expected::Str("expression"),
                         found: other,
-                        span: self.lexer.span().into(),
                     })
                 }
             };
-            while let Some(op) = self.lexer.peek() {
-                let op = match op? {
-                    Token::Arrow => {
+            while let Ok(op) = self.lexer.peek() {
+                let op = match op {
+                    Spanned(Token::Arrow, span) => {
                         self.lexer.next();
-                        let field = self.lexer.next().ok_or(ParsingError::WrongToken {
-                            expected: Expected::Str("struct member"),
-                            found: Token::EOF,
-                            span: self.lexer.span().into(),
-                        })??;
+                        let field = self.lexer.next_expect_ident("struct member")?;
+                        let lhs_start = lhs.span().start;
                         match field {
-                            Token::Ident(ident) => {
-                                lhs = Expression::ArrowDereference(Box::new(lhs), ident);
+                            Spanned(Token::Ident(ident), span) => {
+                                lhs = Spanned(
+                                    Expression::ArrowDereference(
+                                        lhs.map(Box::new),
+                                        Spanned(ident, span),
+                                    ),
+                                    Span::new(lhs_start, span.end),
+                                );
                                 continue;
                             }
-                            other => {
-                                return Err(ParsingError::WrongToken {
-                                    expected: Expected::Str("struct member"),
-                                    found: other,
-                                    span: self.lexer.span().into(),
-                                })
-                            }
+                            _ => unreachable!(),
                         }
                     }
-                    Token::Period => {
+                    Spanned(Token::Period, span) => {
                         self.lexer.next();
-                        let field = self.lexer.next().ok_or(ParsingError::WrongToken {
-                            expected: Expected::Str("struct member"),
-                            found: Token::EOF,
-                            span: self.lexer.span().into(),
-                        })??;
+                        let field = self.lexer.next_expect_ident("struct member")?;
+                        let lhs_start = lhs.span().start;
                         match field {
-                            Token::Ident(ident) => {
-                                lhs = Expression::MemberAccess(Box::new(lhs), ident);
+                            Spanned(Token::Ident(ident), span) => {
+                                lhs = Spanned(
+                                    Expression::MemberAccess(
+                                        lhs.map(Box::new),
+                                        Spanned(ident, span),
+                                    ),
+                                    Span::new(lhs_start, span.end),
+                                );
                                 continue;
                             }
-                            other => {
-                                return Err(ParsingError::WrongToken {
-                                    expected: Expected::Str("struct member"),
-                                    found: other,
-                                    span: self.lexer.span().into(),
-                                })
-                            }
+                            _ => unreachable!(),
                         }
                     }
-                    t @ (Token::Asterisk
-                    | Token::Minus
-                    | Token::Plus
-                    | Token::Slash
-                    | Token::OpenParen
-                    | Token::OpenSquare
-                    | Token::DoubleEquals
-                    | Token::GreaterThanEquals
-                    | Token::LessThanEquals
-                    | Token::GreaterThan
-                    | Token::LessThan
-                    | Token::NotEquals
-                    | Token::Circumflex
-                    | Token::Ampersand
-                    | Token::Pipe
-                    | Token::Increment
-                    | Token::Decrement
-                    | Token::Equals
-                    | Token::Shl
-                    | Token::Shr
-                    | Token::CompoundAdd
-                    | Token::CompoundSub
-                    | Token::CompoundMul
-                    | Token::CompoundDiv
-                    | Token::CompoundAnd
-                    | Token::CompoundOr
-                    | Token::CompoundXor
-                    | Token::AsCast) => t,
-                    Token::CloseParen | Token::CloseSquare | Token::Semicolon => break,
-                    Token::EOF => unreachable!(),
+                    t @ Spanned(
+                        Token::Asterisk
+                        | Token::Minus
+                        | Token::Plus
+                        | Token::Slash
+                        | Token::OpenParen
+                        | Token::OpenSquare
+                        | Token::DoubleEquals
+                        | Token::GreaterThanEquals
+                        | Token::LessThanEquals
+                        | Token::GreaterThan
+                        | Token::LessThan
+                        | Token::NotEquals
+                        | Token::Circumflex
+                        | Token::Ampersand
+                        | Token::Pipe
+                        | Token::Increment
+                        | Token::Decrement
+                        | Token::Equals
+                        | Token::Shl
+                        | Token::Shr
+                        | Token::CompoundAdd
+                        | Token::CompoundSub
+                        | Token::CompoundMul
+                        | Token::CompoundDiv
+                        | Token::CompoundAnd
+                        | Token::CompoundOr
+                        | Token::CompoundXor
+                        | Token::AsCast,
+                        _span,
+                    ) => t,
+                    Spanned(Token::CloseParen | Token::CloseSquare | Token::Semicolon, _span) => {
+                        break
+                    }
                     t => {
                         return Err(ParsingError::WrongToken {
-                            expected: Expected::Str("operator"),
+                            expected: Expected::Str("operator or end of expression"),
                             found: t,
-                            span: self.lexer.span().into(),
                         })
                     }
                 };
@@ -435,50 +531,52 @@ mod parsing {
                         break;
                     }
                     self.lexer.next();
+                    let lhs_start = lhs.span().start;
                     match op {
-                        Token::OpenParen => {
+                        // Function call
+                        Spanned(Token::OpenParen, span) => {
                             let exprs = self.parse_args()?;
-                            let closing = self.lexer.next().ok_or(ParsingError::WrongToken {
-                                expected: Expected::Token(Token::CloseParen),
-                                found: Token::EOF,
-                                span: self.lexer.span().into(),
-                            })??;
-                            match closing {
-                                Token::CloseParen => (),
-                                other => {
-                                    return Err(ParsingError::WrongToken {
-                                        expected: Expected::Token(Token::CloseParen),
-                                        found: other,
-                                        span: self.lexer.span().into(),
-                                    })
-                                }
-                            }
-                            lhs = Expression::FunctionCall(Box::new(lhs), exprs);
+                            let closing = self.lexer.next_expect(Token::CloseParen)?;
+                            let closing_end = closing.span().end;
+                            lhs = Spanned(
+                                Expression::FunctionCall(
+                                    lhs.map(Box::new),
+                                    Spanned(exprs, Span::new(span.start, closing_end)),
+                                ),
+                                Span::new(lhs_start, closing_end),
+                            );
                         }
-                        Token::OpenSquare => {
+                        // Array indexing
+                        Spanned(Token::OpenSquare, span) => {
                             let expr = self.parse_expr_bp(0)?;
-                            let closing = self.lexer.next().ok_or(ParsingError::WrongToken {
-                                expected: Expected::Token(Token::CloseSquare),
-                                found: Token::EOF,
-                                span: self.lexer.span().into(),
-                            })??;
-                            match closing {
-                                Token::CloseSquare => (),
-                                other => {
-                                    return Err(ParsingError::WrongToken {
-                                        expected: Expected::Token(Token::CloseSquare),
-                                        found: other,
-                                        span: self.lexer.span().into(),
-                                    })
-                                }
-                            }
-                            lhs = Expression::ArrayIndex(Box::new(lhs), Box::new(expr));
+                            let closing = self.lexer.next_expect(Token::CloseSquare)?;
+                            let closing_end = closing.span().end;
+                            lhs = Spanned(
+                                Expression::ArrayIndex(lhs.map(Box::new), expr.map(Box::new)),
+                                Span::new(lhs_start, closing_end),
+                            );
                         }
-                        Token::Increment => lhs = Expression::PostIncrement(Box::new(lhs)),
-                        Token::Decrement => lhs = Expression::PostDecrement(Box::new(lhs)),
-                        Token::AsCast => {
+                        Spanned(Token::Increment, span) => {
+                            lhs = Spanned(
+                                Expression::PostIncrement(lhs.map(Box::new)),
+                                span.with_start(lhs_start),
+                            )
+                        }
+                        Spanned(Token::Decrement, span) => {
+                            lhs = Spanned(
+                                // Expression::PostDecrement(lhs.map(Box::new)),
+                                // TESTING
+                                Expression::PostIncrement(lhs.map(Box::new)),
+                                span.with_start(lhs_start),
+                            )
+                        }
+                        Spanned(Token::AsCast, _span) => {
                             let typ = self.parse_type()?;
-                            lhs = Expression::Cast(Box::new(lhs), typ);
+                            let span_end = typ.span().end;
+                            lhs = Spanned(
+                                Expression::Cast(lhs.map(Box::new), typ),
+                                Span::new(lhs_start, span_end),
+                            );
                         }
                         _ => unreachable!(),
                     }
@@ -489,62 +587,80 @@ mod parsing {
                         break;
                     }
                     self.lexer.next();
+                    let lhs_start = lhs.span().start;
                     let rhs = self.parse_expr_bp(rbp)?;
-                    match op {
+                    let rhs_end = rhs.span().end;
+                    let expr_span = Span::new(lhs_start, rhs_end);
+                    let Spanned(op_token, op_span) = op;
+                    let infix_expr = match op_token {
                         Token::DoubleEquals => {
-                            lhs = Expression::Equals(Box::new(lhs), Box::new(rhs))
+                            Expression::Equals((lhs).map(Box::new), (rhs).map(Box::new))
                         }
-                        Token::Asterisk => lhs = Expression::Mul(Box::new(lhs), Box::new(rhs)),
-                        Token::Minus => lhs = Expression::Sub(Box::new(lhs), Box::new(rhs)),
-                        Token::Plus => lhs = Expression::Add(Box::new(lhs), Box::new(rhs)),
-                        Token::Slash => lhs = Expression::Div(Box::new(lhs), Box::new(rhs)),
-                        Token::GreaterThanEquals => {
-                            lhs = Expression::GreaterThanOrEquals(Box::new(lhs), Box::new(rhs))
+                        Token::Asterisk => {
+                            Expression::Mul((lhs).map(Box::new), (rhs).map(Box::new))
                         }
+                        Token::Minus => Expression::Sub((lhs).map(Box::new), (rhs).map(Box::new)),
+                        Token::Plus => Expression::Add((lhs).map(Box::new), (rhs).map(Box::new)),
+                        Token::Slash => Expression::Div((lhs).map(Box::new), (rhs).map(Box::new)),
+                        Token::GreaterThanEquals => Expression::GreaterThanOrEquals(
+                            (lhs).map(Box::new),
+                            (rhs).map(Box::new),
+                        ),
 
                         Token::LessThanEquals => {
-                            lhs = Expression::LessThanOrEquals(Box::new(lhs), Box::new(rhs))
+                            Expression::LessThanOrEquals((lhs).map(Box::new), (rhs).map(Box::new))
                         }
                         Token::GreaterThan => {
-                            lhs = Expression::GreaterThan(Box::new(lhs), Box::new(rhs))
+                            Expression::GreaterThan((lhs).map(Box::new), (rhs).map(Box::new))
                         }
-                        Token::LessThan => lhs = Expression::LessThan(Box::new(lhs), Box::new(rhs)),
+                        Token::LessThan => {
+                            Expression::LessThan((lhs).map(Box::new), (rhs).map(Box::new))
+                        }
                         Token::NotEquals => {
-                            lhs = Expression::NotEquals(Box::new(lhs), Box::new(rhs))
+                            Expression::NotEquals((lhs).map(Box::new), (rhs).map(Box::new))
                         }
                         Token::Circumflex => {
-                            lhs = Expression::BitwiseXor(Box::new(lhs), Box::new(rhs))
+                            Expression::BitwiseXor((lhs).map(Box::new), (rhs).map(Box::new))
                         }
                         Token::Ampersand => {
-                            lhs = Expression::BitwiseAnd(Box::new(lhs), Box::new(rhs))
+                            Expression::BitwiseAnd((lhs).map(Box::new), (rhs).map(Box::new))
                         }
-                        Token::Pipe => lhs = Expression::BitwiseOr(Box::new(lhs), Box::new(rhs)),
-                        Token::Equals => lhs = Expression::Assignment(Box::new(lhs), Box::new(rhs)),
-                        Token::Shl => lhs = Expression::ShiftLeft(Box::new(lhs), Box::new(rhs)),
-                        Token::Shr => lhs = Expression::ShiftRight(Box::new(lhs), Box::new(rhs)),
+                        Token::Pipe => {
+                            Expression::BitwiseOr((lhs).map(Box::new), (rhs).map(Box::new))
+                        }
+                        Token::Equals => {
+                            Expression::Assignment((lhs).map(Box::new), (rhs).map(Box::new))
+                        }
+                        Token::Shl => {
+                            Expression::ShiftLeft((lhs).map(Box::new), (rhs).map(Box::new))
+                        }
+                        Token::Shr => {
+                            Expression::ShiftRight((lhs).map(Box::new), (rhs).map(Box::new))
+                        }
                         Token::CompoundAdd => {
-                            lhs = Expression::CompoundAdd(Box::new(lhs), Box::new(rhs))
+                            Expression::CompoundAdd((lhs).map(Box::new), (rhs).map(Box::new))
                         }
                         Token::CompoundSub => {
-                            lhs = Expression::CompoundSub(Box::new(lhs), Box::new(rhs))
+                            Expression::CompoundSub((lhs).map(Box::new), (rhs).map(Box::new))
                         }
                         Token::CompoundMul => {
-                            lhs = Expression::CompoundMul(Box::new(lhs), Box::new(rhs))
+                            Expression::CompoundMul((lhs).map(Box::new), (rhs).map(Box::new))
                         }
                         Token::CompoundDiv => {
-                            lhs = Expression::CompoundDiv(Box::new(lhs), Box::new(rhs))
+                            Expression::CompoundDiv((lhs).map(Box::new), (rhs).map(Box::new))
                         }
                         Token::CompoundAnd => {
-                            lhs = Expression::CompoundAnd(Box::new(lhs), Box::new(rhs))
+                            Expression::CompoundAnd((lhs).map(Box::new), (rhs).map(Box::new))
                         }
                         Token::CompoundOr => {
-                            lhs = Expression::CompoundOr(Box::new(lhs), Box::new(rhs))
+                            Expression::CompoundOr((lhs).map(Box::new), (rhs).map(Box::new))
                         }
                         Token::CompoundXor => {
-                            lhs = Expression::CompoundXor(Box::new(lhs), Box::new(rhs))
+                            Expression::CompoundXor((lhs).map(Box::new), (rhs).map(Box::new))
                         }
                         _ => unreachable!(),
-                    }
+                    };
+                    lhs = Spanned(infix_expr, expr_span);
                     continue;
                 }
                 break;
@@ -552,40 +668,32 @@ mod parsing {
             Ok(lhs)
         }
 
-        pub fn parse_args(&mut self) -> Result<Vec<Expression>, ParsingError> {
-            match self.lexer.peek() {
-                Some(Ok(t)) => {
-                    if let Token::CloseParen = t {
-                        // empty function call
-                        return Ok(Vec::new());
-                    }
-                }
-                Some(Err(e)) => return Err(e.into()),
-                None => return Err(ParsingError::EOF),
-            };
+        pub fn parse_args(&mut self) -> Result<Vec<Spanned<Expression>>, ParsingError> {
+            let next = self.lexer.peek()?;
+            if let Token::CloseParen = *next {
+                // empty function call
+                return Ok(Vec::new());
+            }
             let mut exprs = Vec::new();
             let first_expr = self.parse_expr()?;
             exprs.push(first_expr);
             loop {
-                match self.lexer.peek() {
-                    Some(Ok(t)) => {
-                        if let Token::CloseParen = t {
-                            return Ok(exprs);
-                        } else if let Token::Comma = t {
-                            // this is what we expect
-                            self.lexer.next();
-                        } else {
-                            self.lexer.next();
-                            return Err(ParsingError::WrongToken {
-                                expected: Expected::Token(Token::CloseParen),
-                                found: t,
-                                span: self.lexer.span().into(),
-                            });
-                        }
-                    }
-                    Some(Err(e)) => return Err(e.into()),
-                    None => return Err(ParsingError::EOF),
-                };
+                let Spanned(token, span) = self.lexer.peek()?;
+                if let Token::CloseParen = token {
+                    // End of function arguments
+                    return Ok(exprs);
+                } else if let Token::Comma = token {
+                    // comma, so there's more expressions.
+                    self.lexer.next();
+                } else {
+                    // something else that's not an expression. abort!
+                    self.lexer.next();
+                    return Err(ParsingError::WrongToken {
+                        expected: Expected::Token(Token::CloseParen),
+                        found: Spanned(token, span),
+                    });
+                }
+                // Since we ran into a comma, we parse. No trailing commas for now :(
                 let expr = self.parse_expr()?;
                 exprs.push(expr)
             }
@@ -603,6 +711,7 @@ mod parsing {
             | Token::Plus
             | Token::LogicalNot
             | Token::Tilde
+            | Token::Ampersand
             | Token::Asterisk => ((), 95),
             _ => todo!(),
         }
@@ -647,52 +756,169 @@ mod parsing {
     mod tests {
         use super::*;
 
-        #[test]
-        fn simple_parse() {
-            let mut parser = Parser::new("Something * **x->y->something / ((5 as int**) * 5)");
-            let parsed = parser.parse_expr().unwrap();
-            dbg!(parsed);
-            assert!(parser.lexer.next().is_none());
+        macro_rules! expr_parse_pass {
+            ($s:expr, $expected:expr $(,)?) => {
+                let mut parser = Parser::new($s);
+                let parsed = parser.parse_expr().unwrap();
+                assert!(matches!(parser.lexer.next(), Err(LexingError::Eof { .. })));
+                assert_eq!(format!("{parsed:?}"), $expected);
+            };
         }
+
+        macro_rules! expr_parse_fail {
+            ($s:expr) => {
+                let mut parser = Parser::new($s);
+                assert!(parser.parse_expr().is_err());
+            };
+        }
+
+        macro_rules! test_prefix {
+            ($test_name:ident, $op:literal) => {
+                #[test]
+                fn $test_name() {
+                    expr_parse_pass!(concat!($op, "x"), concat!("(", $op, "x)"));
+                    expr_parse_pass!(concat!($op, "y"), concat!("(", $op, "y)"));
+                    expr_parse_pass!(
+                        concat!($op, "             100  \n"),
+                        concat!("(", $op, "100)")
+                    );
+                }
+            };
+        }
+
+        macro_rules! test_infix {
+            ($test_name:ident, $op:literal) => {
+                #[test]
+                fn $test_name() {
+                    expr_parse_pass!(concat!("x", $op, "x"), concat!("(x ", $op, " x)"),);
+                    expr_parse_pass!(
+                        concat!("  x     ", $op, "   x    "),
+                        concat!("(x ", $op, " x)"),
+                    );
+                    expr_parse_pass!(concat!("x", $op, "5"), concat!("(x ", $op, " 5)"),);
+                    expr_parse_pass!(concat!("50", $op, "5"), concat!("(50 ", $op, " 5)"),);
+                }
+            };
+        }
+        #[test]
+        fn ints() {
+            expr_parse_pass!("5", "5");
+            expr_parse_pass!("15000", "15000");
+            expr_parse_pass!("-2500500", "(-2500500)",);
+            expr_parse_pass!("0x55125", "348453");
+            expr_parse_pass!("2147483647", "2147483647");
+            expr_parse_fail!("2147483648");
+            expr_parse_fail!("");
+            expr_parse_pass!("-0x1", "(-1)");
+            expr_parse_pass!("0xffffffff", "-1");
+        }
+
+        #[test]
+        fn idents() {
+            expr_parse_pass!("_", "_");
+            expr_parse_pass!("____________", "____________");
+            expr_parse_pass!("_something", "_something");
+            expr_parse_pass!("var_name", "var_name");
+            expr_parse_pass!("var", "var");
+            expr_parse_fail!("int");
+            expr_parse_fail!("struct");
+            expr_parse_fail!("void");
+            expr_parse_fail!("fn");
+            expr_parse_pass!(
+                "some_really_long_variable_name_idk_this_is_probably_long_enough",
+                "some_really_long_variable_name_idk_this_is_probably_long_enough",
+            );
+            expr_parse_pass!("u31", "u31");
+            expr_parse_fail!("3ab");
+        }
+
+        test_prefix!(logicalnot, "!");
+        test_prefix!(addrof, "&");
+        test_prefix!(unarynegation, "-");
+        test_prefix!(unaryplus, "+");
+        test_prefix!(preincrement, "++");
+        test_prefix!(predecrement, "--");
+        test_prefix!(asteriskdereference, "*");
+        test_prefix!(bitwisenot, "~");
+
+        test_infix!(equals, "==");
+        test_infix!(notequals, "!=");
+        test_infix!(greaterthanorequals, ">=");
+        test_infix!(lessthanorequals, "<=");
+        test_infix!(greaterthan, ">");
+        test_infix!(lessthan, "<");
+        test_infix!(add, "+");
+        test_infix!(sub, "-");
+        test_infix!(mul, "*");
+        test_infix!(div, "/");
+        test_infix!(bitwiseand, "&");
+        test_infix!(bitwiseor, "|");
+        test_infix!(bitwisexor, "^");
+        test_infix!(shiftleft, "<<");
+        test_infix!(shiftright, ">>");
+        test_infix!(assignment, "=");
+        test_infix!(compoundadd, "+=");
+        test_infix!(compoundsub, "-=");
+        test_infix!(compoundmul, "*=");
+        test_infix!(compounddiv, "/=");
+        test_infix!(compoundand, "&=");
+        test_infix!(compoundor, "|=");
+        test_infix!(compoundxor, "^=");
+
+        /*
+        PostIncrement(Box<Expression>),
+        PostDecrement(Box<Expression>),
+        ArrowDereference(Box<Expression>, String),
+        Cast(Box<Expression>, Type),
+        // Parenthesized(Box<Expression>),
+        FunctionCall(Box<Expression>, Vec<Expression>),
+        StructInstantiation(Vec<Expression>),
+        NullPtr,
+        MemberAccess(Box<Expression>, String),
+        ArrayIndex(Box<Expression>, Box<Expression>),
+        */
     }
 }
 
 mod ast {
     pub use super::span::*;
-    #[derive(Debug, Clone)]
+    #[derive(PartialEq, Clone)]
     pub enum Type {
         Void,
         Int,
         Struct(String),
-        Ptr(Box<Type>),
-        Fn(String),
+        Ptr(Box<Spanned<Type>>),
+        Fn {
+            args: Spanned<Vec<Type>>,
+            ret: Box<Spanned<Type>>,
+        },
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone)]
     pub struct Program {
-        pub top_level: Vec<TopLevel>,
+        pub top_level: Vec<TopLevelDecl>,
     }
 
-    #[derive(Clone, Debug)]
-    pub enum TopLevel {
-        FunctionDecl(FunctionDecl),
-        VariableDecl(VariableDecl),
-        StructDecl(StructDecl),
+    #[derive(Clone)]
+    pub enum TopLevelDecl {
+        Function(FunctionDecl),
+        Variable(VariableDecl),
+        Struct(StructDecl),
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone)]
     pub struct StructDecl {
         pub name: String,
         pub members: Vec<NameAndType>,
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone)]
     pub struct NameAndType {
         pub name: String,
         pub typ: Type,
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone)]
     pub struct FunctionDecl {
         pub return_type: Type,
         pub name: String,
@@ -700,14 +926,14 @@ mod ast {
         pub block: Block,
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     pub struct VariableDecl {
         pub typ: Type,
         pub name: String,
         pub assigned: Option<Expression>,
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     pub enum Statement {
         Expression(Expression),
         Declaration(VariableDecl),
@@ -715,68 +941,72 @@ mod ast {
         If(If),
         While(While),
         For(For),
-        Parenthesized(Box<Statement>),
+        // Parenthesized(Box<Statement>),
         // TODO LVALUE ALL
         // TODO goto?
     }
-    #[derive(Debug, Clone)]
+
+    type SpannedBox<T> = Spanned<Box<T>>;
+
+    #[derive(Clone, PartialEq)]
     pub enum Expression {
-        LogicalNot(Box<Expression>),
-        Equals(Box<Expression>, Box<Expression>),
-        NotEquals(Box<Expression>, Box<Expression>),
-        GreaterThanOrEquals(Box<Expression>, Box<Expression>),
-        LessThanOrEquals(Box<Expression>, Box<Expression>),
-        GreaterThan(Box<Expression>, Box<Expression>),
-        LessThan(Box<Expression>, Box<Expression>),
-        ArrayIndex(Box<Expression>, Box<Expression>),
-        AsteriskDereference(Box<Expression>),
-        ArrowDereference(Box<Expression>, String),
+        LogicalNot(SpannedBox<Expression>),
+        Equals(SpannedBox<Expression>, SpannedBox<Expression>),
+        NotEquals(SpannedBox<Expression>, SpannedBox<Expression>),
+        GreaterThanOrEquals(SpannedBox<Expression>, SpannedBox<Expression>),
+        LessThanOrEquals(SpannedBox<Expression>, SpannedBox<Expression>),
+        GreaterThan(SpannedBox<Expression>, SpannedBox<Expression>),
+        LessThan(SpannedBox<Expression>, SpannedBox<Expression>),
+        ArrayIndex(SpannedBox<Expression>, SpannedBox<Expression>),
+        AsteriskDereference(SpannedBox<Expression>),
+        ArrowDereference(SpannedBox<Expression>, Spanned<String>),
         IntLiteral(i32),
         Ident(String),
-        Cast(Box<Expression>, Type),
-        // Parenthesized(Box<Expression>),
-        Add(Box<Expression>, Box<Expression>),
-        Sub(Box<Expression>, Box<Expression>),
-        Mul(Box<Expression>, Box<Expression>),
-        Div(Box<Expression>, Box<Expression>),
-        BitwiseAnd(Box<Expression>, Box<Expression>),
-        BitwiseOr(Box<Expression>, Box<Expression>),
-        BitwiseXor(Box<Expression>, Box<Expression>),
-        BitwiseNot(Box<Expression>),
-        ShiftLeft(Box<Expression>, Box<Expression>),
-        ShiftRight(Box<Expression>, Box<Expression>),
-        FunctionCall(Box<Expression>, Vec<Expression>),
-        StructInstantiation(Vec<Expression>),
+        Cast(SpannedBox<Expression>, Spanned<Type>),
+        // Parenthesized(SpannedBox<Expression>),
+        Add(SpannedBox<Expression>, SpannedBox<Expression>),
+        Sub(SpannedBox<Expression>, SpannedBox<Expression>),
+        Mul(SpannedBox<Expression>, SpannedBox<Expression>),
+        Div(SpannedBox<Expression>, SpannedBox<Expression>),
+        BitwiseAnd(SpannedBox<Expression>, SpannedBox<Expression>),
+        BitwiseOr(SpannedBox<Expression>, SpannedBox<Expression>),
+        BitwiseXor(SpannedBox<Expression>, SpannedBox<Expression>),
+        BitwiseNot(SpannedBox<Expression>),
+        ShiftLeft(SpannedBox<Expression>, SpannedBox<Expression>),
+        ShiftRight(SpannedBox<Expression>, SpannedBox<Expression>),
+        FunctionCall(SpannedBox<Expression>, Spanned<Vec<Spanned<Expression>>>),
+        StructInstantiation(Spanned<Vec<Spanned<Expression>>>),
         NullPtr,
-        MemberAccess(Box<Expression>, String),
-        UnaryNegation(Box<Expression>),
-        UnaryPlus(Box<Expression>),
-        PreIncrement(Box<Expression>),
-        PreDecrement(Box<Expression>),
-        PostIncrement(Box<Expression>),
-        PostDecrement(Box<Expression>),
-        Assignment(Box<Expression>, Box<Expression>),
-        AddrOf(Box<Expression>),
-        CompoundAdd(Box<Expression>, Box<Expression>),
-        CompoundSub(Box<Expression>, Box<Expression>),
-        CompoundMul(Box<Expression>, Box<Expression>),
-        CompoundDiv(Box<Expression>, Box<Expression>),
-        CompoundAnd(Box<Expression>, Box<Expression>),
-        CompoundOr(Box<Expression>, Box<Expression>),
-        CompoundXor(Box<Expression>, Box<Expression>),
+        MemberAccess(SpannedBox<Expression>, Spanned<String>),
+        UnaryNegation(SpannedBox<Expression>),
+        UnaryPlus(SpannedBox<Expression>),
+        PreIncrement(SpannedBox<Expression>),
+        PreDecrement(SpannedBox<Expression>),
+        PostIncrement(SpannedBox<Expression>),
+        PostDecrement(SpannedBox<Expression>),
+        Assignment(SpannedBox<Expression>, SpannedBox<Expression>),
+        AddrOf(SpannedBox<Expression>),
+        CompoundAdd(SpannedBox<Expression>, SpannedBox<Expression>),
+        CompoundSub(SpannedBox<Expression>, SpannedBox<Expression>),
+        CompoundMul(SpannedBox<Expression>, SpannedBox<Expression>),
+        CompoundDiv(SpannedBox<Expression>, SpannedBox<Expression>),
+        CompoundAnd(SpannedBox<Expression>, SpannedBox<Expression>),
+        CompoundOr(SpannedBox<Expression>, SpannedBox<Expression>),
+        CompoundXor(SpannedBox<Expression>, SpannedBox<Expression>),
+        Parenthesized(SpannedBox<Expression>),
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     pub struct If {
         pub condition: Expression,
         pub block: Block,
     }
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     pub struct While {
-        pub condtion: Expression,
+        pub condition: Expression,
         pub block: Block,
     }
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     pub struct For {
         pub init: Box<Statement>,
         pub condition: Expression,
@@ -784,12 +1014,12 @@ mod ast {
         pub block: Block,
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     pub struct Block {
         pub statements: Vec<Statement>,
     }
 
-    // #[derive(Debug, Clone)]
+    // #[derive(, Clone)]
     // pub enum LValue {
     //     Ident(String),
     //     Dereference(Expression),
@@ -800,59 +1030,184 @@ mod ast {
     // }
 }
 
-// mod assembling {
-//     #[derive(Clone, Debug)]
-//     struct Assembler {
-//         code: String,
-//     }
-// }
-
-mod span {
-    use std::ops::{Deref, DerefMut, Range};
-
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    pub struct Span {
-        pub start: usize,
-        pub end: usize,
-    }
-
-    impl From<Range<usize>> for Span {
-        fn from(value: Range<usize>) -> Self {
-            Self {
-                start: value.start,
-                end: value.end,
+mod ast_sfmt {
+    use super::ast::*;
+    // we abuse LowerExp to print an S-expression.
+    impl std::fmt::Debug for Type {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            match self {
+                Type::Void => write!(f, "void"),
+                Type::Int => write!(f, "int"),
+                Type::Struct(struct_name) => write!(f, "struct {struct_name}"),
+                Type::Ptr(spanned) => {
+                    write!(f, "{spanned:?}*")
+                }
+                Type::Fn { args, ret } => {
+                    let mut helper = f.debug_tuple("fn");
+                    for typ in args.inner() {
+                        helper.field(typ);
+                    }
+                    helper.finish()?;
+                    write!(f, " -> {ret:?}")
+                }
             }
         }
     }
-
-    impl Span {
-        pub fn new(start: usize, end: usize) -> Self {
-            Self { start, end }
-        }
-        pub fn into_inner(self) -> (usize, usize) {
-            (self.start, self.end)
-        }
-    }
-    #[derive(Debug, Clone, Copy)]
-    pub struct Spanned<T> {
-        pub inner: T,
-        pub span: Span,
-    }
-    impl<T> Spanned<T> {
-        pub fn into_inner(self) -> T {
-            self.inner
+    impl std::fmt::Debug for Program {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            for tl in &self.top_level {
+                write!(f, "{tl:?}")?;
+            }
+            Ok(())
         }
     }
-    impl<T> Deref for Spanned<T> {
-        type Target = T;
-
-        fn deref(&self) -> &Self::Target {
-            &self.inner
+    impl std::fmt::Debug for TopLevelDecl {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            match self {
+                TopLevelDecl::Function(function_decl) => write!(f, "{function_decl:?}"),
+                TopLevelDecl::Variable(variable_decl) => write!(f, "{variable_decl:?}"),
+                TopLevelDecl::Struct(struct_decl) => write!(f, "{struct_decl:?}"),
+            }
         }
     }
-    impl<T> DerefMut for Spanned<T> {
-        fn deref_mut(&mut self) -> &mut Self::Target {
-            &mut self.inner
+    impl std::fmt::Debug for StructDecl {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            let mut helper = f.debug_struct(&self.name);
+            for field in &self.members {
+                helper.field(&field.name, &field.typ);
+            }
+            helper.finish()?;
+            Ok(())
+        }
+    }
+    impl std::fmt::Debug for NameAndType {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            write!(f, "{} {:?}", self.name, self.typ)
+        }
+    }
+    impl std::fmt::Debug for FunctionDecl {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            write!(f, "{:?} ", self.return_type)?;
+            let mut helper = f.debug_tuple(&self.name);
+            for paramlist in &self.parameters {
+                helper.field(paramlist);
+            }
+            helper.finish()?;
+            write!(f, " ")?;
+            write!(f, "{:?}", self.block)?;
+            Ok(())
+        }
+    }
+    impl std::fmt::Debug for VariableDecl {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            todo!()
+        }
+    }
+    impl std::fmt::Debug for Statement {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            match self {
+                Statement::Expression(expression) => write!(f, "{expression:?}"),
+                Statement::Declaration(variable_decl) => write!(f, "{variable_decl:?}"),
+                Statement::Block(block) => write!(f, "{block:?}"),
+                Statement::If(if_) => write!(f, "{if_:?}"),
+                Statement::While(while_) => write!(f, "{while_:?}"),
+                Statement::For(for_) => write!(f, "{for_:?}"),
+                // Statement::Parenthesized(statement) => write!(f, "[<{statement:?}>]"),
+            }
+        }
+    }
+    impl std::fmt::Debug for Expression {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            match self {
+                Expression::LogicalNot(inner) => write!(f, "(!{inner:?})"),
+                Expression::Equals(lhs, rhs) => write!(f, "({lhs:?} == {rhs:?})"),
+                Expression::NotEquals(lhs, rhs) => write!(f, "({lhs:?} != {rhs:?})"),
+                Expression::GreaterThanOrEquals(lhs, rhs) => write!(f, "({lhs:?} >= {rhs:?})"),
+                Expression::LessThanOrEquals(lhs, rhs) => write!(f, "({lhs:?} <= {rhs:?})"),
+                Expression::GreaterThan(lhs, rhs) => write!(f, "({lhs:?} > {rhs:?})"),
+                Expression::LessThan(lhs, rhs) => write!(f, "({lhs:?} < {rhs:?})"),
+                Expression::ArrayIndex(lhs, rhs) => write!(f, "({lhs:?}[{rhs:?}])"),
+                Expression::AsteriskDereference(inner) => write!(f, "(*{inner:?})"),
+                Expression::ArrowDereference(lhs, rhs) => write!(f, "({lhs:?}->{rhs:?})"),
+                Expression::IntLiteral(n) => write!(f, "{n}"),
+                Expression::Ident(n) => write!(f, "{n}"),
+                Expression::Cast(lhs, rhs) => write!(f, "({lhs:?} as {rhs:?})"),
+                Expression::Add(lhs, rhs) => write!(f, "({lhs:?} + {rhs:?})"),
+                Expression::Sub(lhs, rhs) => write!(f, "({lhs:?} - {rhs:?})"),
+                Expression::Mul(lhs, rhs) => write!(f, "({lhs:?} * {rhs:?})"),
+                Expression::Div(lhs, rhs) => write!(f, "({lhs:?} / {rhs:?})"),
+                Expression::BitwiseAnd(lhs, rhs) => write!(f, "({lhs:?} & {rhs:?})"),
+                Expression::BitwiseOr(lhs, rhs) => write!(f, "({lhs:?} | {rhs:?})"),
+                Expression::BitwiseXor(lhs, rhs) => write!(f, "({lhs:?} ^ {rhs:?})"),
+                Expression::BitwiseNot(inner) => write!(f, "(~{inner:?})"),
+                Expression::ShiftLeft(lhs, rhs) => write!(f, "({lhs:?} << {rhs:?})"),
+                Expression::ShiftRight(lhs, rhs) => write!(f, "({lhs:?} >> {rhs:?})"),
+                Expression::FunctionCall(func, args) => {
+                    write!(f, "{func:?}")?;
+                    let mut tuple = f.debug_tuple("");
+                    for arg in args.inner() {
+                        tuple.field(args);
+                    }
+                    tuple.finish()?;
+                    Ok(())
+                }
+                Expression::StructInstantiation(spanned) => {
+                    let mut s = f.debug_tuple("");
+                    s.field(&"struct");
+                    for val in spanned.inner() {
+                        s.field(val);
+                    }
+                    s.finish()?;
+                    Ok(())
+                }
+                Expression::NullPtr => write!(f, "nullptr"),
+                Expression::MemberAccess(lhs, rhs) => write!(f, "({lhs:?}.{})", rhs.inner()),
+                Expression::UnaryNegation(inner) => write!(f, "(-{inner:?})"),
+                Expression::UnaryPlus(inner) => write!(f, "(+{inner:?})"),
+                Expression::PreIncrement(inner) => write!(f, "(++{inner:?})"),
+                Expression::PreDecrement(inner) => write!(f, "(--{inner:?})"),
+                Expression::PostIncrement(inner) => write!(f, "({inner:?}++)"),
+                Expression::PostDecrement(inner) => write!(f, "({inner:?}--)"),
+                Expression::Assignment(lhs, rhs) => write!(f, "({lhs:?} = {rhs:?})"),
+                Expression::AddrOf(inner) => write!(f, "(&{inner:?})"),
+                Expression::CompoundAdd(lhs, rhs) => write!(f, "({lhs:?} += {rhs:?})"),
+                Expression::CompoundSub(lhs, rhs) => write!(f, "({lhs:?} -= {rhs:?})"),
+                Expression::CompoundMul(lhs, rhs) => write!(f, "({lhs:?} *= {rhs:?})"),
+                Expression::CompoundDiv(lhs, rhs) => write!(f, "({lhs:?} /= {rhs:?})"),
+                Expression::CompoundAnd(lhs, rhs) => write!(f, "({lhs:?} &= {rhs:?})"),
+                Expression::CompoundOr(lhs, rhs) => write!(f, "({lhs:?} |= {rhs:?})"),
+                Expression::CompoundXor(lhs, rhs) => write!(f, "({lhs:?} ^= {rhs:?})"),
+                Expression::Parenthesized(inner) => write!(f, "({inner:?})"),
+            }
+        }
+    }
+    impl std::fmt::Debug for If {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            write!(f, "if ({:?}) {:?}", self.condition, self.block)
+        }
+    }
+    impl std::fmt::Debug for While {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            write!(f, "while ({:?}) {:?}", self.condition, self.block)
+        }
+    }
+    impl std::fmt::Debug for For {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            write!(
+                f,
+                "for ({:?}; {:?}; {:?}) {:?}",
+                self.init, self.condition, self.after, self.block
+            )
+        }
+    }
+    impl std::fmt::Debug for Block {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            let mut helper = f.debug_struct("");
+            for (i, stmt) in self.statements.iter().enumerate() {
+                helper.field(&i.to_string(), stmt);
+            }
+            helper.finish()?;
+            Ok(())
         }
     }
 }
